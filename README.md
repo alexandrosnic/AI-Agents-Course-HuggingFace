@@ -58,6 +58,213 @@ Chat templates are divided into base and instruct models. Base are trained on ra
 
 So to convert a conversation into a prompt, we load chat template from the tokenizer of the model.
 
+### VLMs
+Vision language models are broadly defined as multimodal models that can learn from images and text. The use cases include chatting about images, image recognition via instructions, visual question answering, document understanding, image captioning, and others. Some vision language models can also capture spatial properties in an image. 
+
+One may find a VLM model based on the [OpenVLM leaderboard](https://huggingface.co/spaces/opencompass/open_vlm_leaderboard). 
+
+<details>
+<summary>VLM with transformers</summary>
+
+#### VLM with transformers
+
+We will go through how to use these models using transformers and fine-tune using SFTTrainer.
+Let’s initialize the model and the processor first.
+
+```
+from transformers import LlavaNextProcessor, LlavaNextForConditionalGeneration
+import torch
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+processor = LlavaNextProcessor.from_pretrained("llava-hf/llava-v1.6-mistral-7b-hf")
+model = LlavaNextForConditionalGeneration.from_pretrained(
+    "llava-hf/llava-v1.6-mistral-7b-hf",
+    torch_dtype=torch.float16,
+    low_cpu_mem_usage=True
+)
+model.to(device)
+```
+
+We now pass the image and the text prompt to the processor, and then pass the processed inputs to the generate. 
+```
+from PIL import Image
+import requests
+
+url = "https://github.com/haotian-liu/LLaVA/blob/1a91fc274d7c35a9b50b3cb29c4247ae5837ce39/images/llava_v1_5_radar.jpg?raw=true"
+image = Image.open(requests.get(url, stream=True).raw)
+prompt = "[INST] <image>\nWhat is shown in this image? [/INST]"
+
+inputs = processor(prompt, image, return_tensors="pt").to(device)
+output = model.generate(**inputs, max_new_tokens=100)
+
+print(processor.decode(output[0], skip_special_tokens=True))
+```
+
+#### Fine-tuning Vision Language Models with TRL
+
+```
+from trl.commands.cli_utils import SftScriptArguments, TrlParser
+
+parser = TrlParser((SftScriptArguments, TrainingArguments))
+args, training_args = parser.parse_args_and_config()
+
+LLAVA_CHAT_TEMPLATE = """A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the user's questions. {% for message in messages %}{% if message['role'] == 'user' %}USER: {% else %}ASSISTANT: {% endif %}{% for item in message['content'] %}{% if item['type'] == 'text' %}{{ item['text'] }}{% elif item['type'] == 'image' %}<image>{% endif %}{% endfor %}{% if message['role'] == 'user' %} {% else %}{{eos_token}}{% endif %}{% endfor %}"""
+```
+
+We will now initialize our model and tokenizer.
+```
+from transformers import AutoTokenizer, AutoProcessor, TrainingArguments, LlavaForConditionalGeneration
+import torch
+
+model_id = "llava-hf/llava-1.5-7b-hf"
+tokenizer = AutoTokenizer.from_pretrained(model_id)
+tokenizer.chat_template = LLAVA_CHAT_TEMPLATE
+processor = AutoProcessor.from_pretrained(model_id)
+processor.tokenizer = tokenizer
+
+model = LlavaForConditionalGeneration.from_pretrained(model_id, torch_dtype=torch.float16)
+```
+
+Let’s create a data collator to combine text and image pairs.
+
+```
+class LLavaDataCollator:
+    def __init__(self, processor):
+        self.processor = processor
+
+    def __call__(self, examples):
+        texts = []
+        images = []
+        for example in examples:
+            messages = example["messages"]
+            text = self.processor.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=False
+            )
+            texts.append(text)
+            images.append(example["images"][0])
+
+        batch = self.processor(texts, images, return_tensors="pt", padding=True)
+
+        labels = batch["input_ids"].clone()
+        if self.processor.tokenizer.pad_token_id is not None:
+            labels[labels == self.processor.tokenizer.pad_token_id] = -100
+        batch["labels"] = labels
+
+        return batch
+
+data_collator = LLavaDataCollator(processor)
+```
+
+Load our dataset.
+
+```
+from datasets import load_dataset
+
+raw_datasets = load_dataset("HuggingFaceH4/llava-instruct-mix-vsft")
+train_dataset = raw_datasets["train"]
+eval_dataset = raw_datasets["test"]
+```
+
+Initialize the SFTTrainer, passing in the model, the dataset splits, PEFT configuration and data collator and call train().
+```
+from trl import SFTTrainer
+
+trainer = SFTTrainer(
+    model=model,
+    args=training_args,
+    train_dataset=train_dataset,
+    eval_dataset=eval_dataset,
+    dataset_text_field="text",  # need a dummy field
+    tokenizer=tokenizer,
+    data_collator=data_collator,
+    dataset_kwargs={"skip_prepare_dataset": True},
+)
+
+trainer.train()
+```
+
+The trained model can be found [here](https://huggingface.co/HuggingFaceH4/vsft-llava-1.5-7b-hf-trl).
+
+</details>
+
+
+#### VLM Models
+
+- [Any-to-any models](https://huggingface.co/collections/merve/any-to-any-models-6822042ee8eb7fb5e38f9b62): Any-to-any models, as the name suggests, are models that can take in any modality and output any modality (image, text, audio). A capable such model is Qwen2.5-Omni.
+
+- Reasoning models: They are models that can solve complex problems. An example is Kimi-VL-A3B-Thinking
+
+- Smol yet Capable Models: When we say small vision language models we often refer to models with less than 2B parameters that can be run on consumer GPUs. SmolVLM is a good example model family for smaller vision language models. Another striking model is [gemma3-1b-it](https://huggingface.co/google/gemma-3-1b-it) by Google DeepMind. It’s particularly exciting as it’s one of the smallest multimodal models to have 32k token context window, and supports 140+ languages. An example of using these models:
+```
+python3 -m mlx_vlm.generate --model HuggingfaceTB/SmolVLM-500M-Instruct --max-tokens 400 --temp 0.0 --image https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/vlm_example.jpg --prompt "What is in this image?"
+```
+```
+llama-mtmd-cli -hf ggml-org/gemma-3-4b-it-GGUF
+```
+
+- Mixture-of-Experts as Decoders: [Mixture of Expert (MoEs)](https://huggingface.co/blog/moe) models offer an alternative to dense architectures by dynamically selecting and activating only the most relevant sub-models, termed "experts", to process a given input data segment. MoEs need more memory cost due to the entire model being on the GPU. In the widely adopted Transformer architecture, MoE layers are most commonly integrated by replacing the standard Feed-Forward Network (FFN) layers within each Transformer block. Vision language models that have mixture-of-experts decoders seem to have enhanced performance.
+
+- Vision-Language-Action Models: VLMs for robotics. VLAs take images and text instructions, and return text indicating actions for the robot to take directly. VLAs extend vision language models by adding action and state tokens to interact with and control physical environments. VLAs are usually fine-tuned on top of a base VLM. Examples are [π0 and π0-FAST](https://huggingface.co/lerobot/pi0) and [GR00T N1](https://huggingface.co/nvidia/GR00T-N1-2B)
+
+#### Specialized Capabilities
+
+Some capabilities are:
+Object Detection, Segmentation, Counting with Vision Language Models.
+
+An example is [PaliGemma](https://huggingface.co/blog/paligemma). For detection, the model outputs the bounding box coordinates as tokens. For segmentation, on the other hand, the model outputs detection tokens and segmentation tokens. These segmentation tokens aren’t all the segmented pixel coordinates, but codebook indices that are decoded by a variational autoencoder trained to decode these tokens into valid segmentation masks (as shown in the figure below).
+
+Other models are PaliGemma 2, Molmo (for object counting), Qwen2.5-VL (detect, point to and count objects)
+
+Multimodal Safety Models are also specialized capability. They are used before and after vision language models to filter their inputs and outputs. Examples are ShieldGemma 2, Llama Guard 4.
+
+Another capability is: Multimodal RAG: retrievers, rerankers.
+Multimodal retrievers take a stack of PDFs and a query as input and return the most relevant page numbers along with their confidence scores. The most relevant pages are then fed to the vision language model along with the query, and the VLM generates the answer.
+
+#### Multimodal Agents
+
+Vision language models unlock many agentic workflows from chatting with documents to computer use. This is possible by operating over GUIs.
+
+For example, in order to describe documents (static):
+```
+agent = CodeAgent(tools=[], model=model) # no need for tools
+agent.run("Describe these documents:", images=[document_1, document_2, document_3])
+```
+
+If we want the agent to take screenshots for browser/UI use (dynamic => callback):
+```
+def save_screenshot(memory_step: ActionStep, agent: CodeAgent) -> None:
+    """ 
+    Takes screenshots and writes to observations.
+"""
+  png_bytes = driver.get_screenshot_as_png()
+        memory_step.observations_images = [image.copy()]  # persist images to memory_step
+    url_info = f"Current url: {driver.current_url}"
+    memory_step.observations = (
+        url_info if memory_step.observations is None else memory_step.observations + "\n" + url_info
+    )
+    return
+
+agent = CodeAgent(
+    tools=[go_back, close_popups, search_item_ctrl_f], # pass navigation tools
+    model=model,
+    additional_authorized_imports=["helium"],
+    step_callbacks=[save_screenshot], # pass callback
+)
+```
+or in a CLI command:
+```
+webagent "go to xyz.com/men, get to sale section, click the first clothing item you see. Get the product details, and the price, return them. note that I'm shopping from France"
+```
+
+#### Video Language Models
+
+Most vision language models these days can handle videos, because videos can be represented as a sequence of frames. However, video understanding is tricky because of the temporal relationship between frames and the large amount of frames, so different techniques are used to select a representative set of video frames.
+Different approaches to this problem are:
+- [LongVU model](https://huggingface.co/collections/Vision-CAIR/longvu-67181d2debabfc1eb050c21d) 
+- [Qwen2.5VL](https://huggingface.co/collections/Qwen/qwen25-vl-6795ffac22b334a837c0f9a5) 
+- [Gemma 3](https://huggingface.co/collections/google/gemma-3-release-67c6c6f89c4f76621268bb6d)
+
+
 ### Tools
 
 A Tool is a function given to the LLM. This function should fulfill a clear objective.
@@ -1227,6 +1434,65 @@ There are two categories of evaluations for AI agents: online evaluation and off
 
 The best practice is a combination of the two: offline evaluation → deploy new agent version → monitor online metrics and collect new failure examples → add those examples to offline test set → iterate.
 
-## Example
+## Gala Example
 
 The [example](https://huggingface.co/learn/agents-course/unit3/agentic-rag/introduction) of hugging face online course can be found in the gala_example folder.
+
+## AI Agent for the GAIA benchmark
+
+As part of the final step of the course, we had to build an AI agent and evaluate it based on the [GAIA benchmark](https://huggingface.co/datasets/gaia-benchmark/GAIA). GAIA is made of more than 450 non-trivial question with an unambiguous answer. and a score over 30% is considered as a competent AI agent.
+
+### Inspirations
+
+Some examples of powerful agents and their corresponding agents are:
+- [GPT Researcher](https://github.com/assafelovic/gpt-researcher):
+    - Utilize a planner that generates a research question.
+    - Utilize execution agents that gather relevant information.
+    - Utilize a publisher that aggregates all findings into a comprehensive report. 
+
+- [STORM](https://arxiv.org/abs/2402.14207) paper, the research team can be comprised of 8 agents and replicated [here](https://github.com/assafelovic/gpt-researcher/tree/master/multi_agents):
+    - Human - The human in the loop that oversees the process and provides feedback to the agents.
+    - Chief Editor - Oversees the research process and manages the team. This is the "master" agent that coordinates the other agents using Langgraph.
+    - Researcher (gpt-researcher) - A specialized autonomous agent that conducts in depth research on a given topic.
+    - Editor - Responsible for planning the research outline and structure.
+    - Reviewer - Validates the correctness of the research results given a set of criteria.
+    - Revisor - Revises the research results based on the feedback from the reviewer.
+    - Writer - Responsible for compiling and writing the final report.
+    - Publisher - Responsible for publishing the final report in various formats.
+
+These follow these steps:
+- Planning stage
+- Data collection and analysis
+- Review and revision
+- Writing and submission
+- Publication
+
+- [Magentic One](https://www.microsoft.com/en-us/research/articles/magentic-one-a-generalist-multi-agent-system-for-solving-complex-tasks/)
+    - Orchestrator:  The lead agent responsible for task decomposition, planning, directing other agents in executing subtasks, tracking overall progress, and taking corrective actions as needed
+    - Other Agents:
+        - Coder: Write code and reason to solve tasks
+        - ComputerTerminal: Execute code written by the coder agent
+        - Websurfer: Browse the internet
+        - Filesurfer: Navigate files
+
+- [Jina AI](https://jina.ai/news/a-practical-guide-to-implementing-deepsearch-deepresearch/)
+Loop in a [Search - Read - Reason - Search] sceme until you have an answer or until budget is exceeded.
+
+### Build the agent
+
+Based on the [open Deep Research](https://huggingface.co/blog/open-deep-research), a first step to build a more competent AI agent is to use CodeAgent, as [code is specifically designed to express complex sequences of actions](https://huggingface.co/papers/2402.01030). Also using smolagents, means better handling of the state of each step of the agent.
+
+A next step is to provide it with the right tools. According to existing agents, a good set of tools needed are:
+- A web browser agent: eg OpenAI's Operator. Alternatively, it can be a vision-based web browser like [this one](https://github.com/huggingface/smolagents/blob/main/src/smolagents/vision_web_browser.py)
+- A document reader/summarizer agent: a text inspector that can read any kind of text. An example is [this one](https://github.com/huggingface/smolagents/blob/main/examples/open_deep_research/scripts/text_inspector_tool.py)
+- Data analysis / calculator agent: Manage numerical computations or statistical inference tasks.
+
+Considering the division of a human brain into two systems: a fast, intuitive, unconscious part and a slow, analytical, conscious part, I decided on top of these tools, to use the following agents:
+- Input and query parsing agent: Parse and comprehend the user's query, identifying key objectives, relevant keywords and constraints. It convert the raw text into a more structured data format for the subsequent layers.
+- Orchestrator: In order to not fall into an infinite loop, the paper [Plan and Solve](https://arxiv.org/abs/2305.04091) suggests that we first devise a plan to divide the entire task into smaller subtasks and then carrying out the subtasks according to the plan. The orchestrator then acts as the central executive function, evaluating the overall task, decomposing it into manageable, deterministic, finite set of subtasks, and assigning these tasks to specialized agents. Key functions of the orchestrator are:
+    - Task Decomposition: Break down complex queries into specific components (like “search the web,” “read documents,” “compute statistics”).
+    - Agent Scheduling: Decide which sub-agent (or tool) works on which aspect, ensuring efficient and non-redundant processing.
+    - Integration: Gather and review the outputs from the sub-agents, ensuring consistency and coherence in the final response
+- Integration and synthesis agent: Act as the “final thought” process—integrating outputs from all specialized agents and rechecking for coherence and accuracy.
+- Memory and context agent: Maintain short-term and long-term contextual information across interactions.
+- Feedback loop and adaptive learning agent: Continually assess the performance of different modules, adjust strategies, and refine internal parameters when inconsistencies arise

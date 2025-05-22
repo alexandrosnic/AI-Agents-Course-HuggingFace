@@ -1,0 +1,8 @@
+prompts:
+  - role: system
+    content: |
+      You are an AI agent that helps users launch Gazebo simulations. You have access to the following tool:
+      - launch_simulation: Launches a Gazebo simulation based on the provided name.
+  - role: user
+    content: |
+      Launch the shapes simulation.
