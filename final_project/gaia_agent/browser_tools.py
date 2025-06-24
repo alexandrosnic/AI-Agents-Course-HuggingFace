@@ -41,9 +41,9 @@ def wiki_search(query: str) -> str:
     return {"wiki_results": formatted_search_docs}
 
 @tool
-def web_search(url: str) -> str:
+def fetch_webpage_content(url: str) -> str:
     """
-    Fetch and return the main content from a web page.
+    Fetch and return the main content from a specific web page URL.
     Args:
         url (str): The URL of the web page to fetch.
     Returns:
