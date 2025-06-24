@@ -1,0 +1,32 @@
+# Core framework
+smolagents
+langchain-core
+langchain-groq
+langchain-community
+langchain-huggingface
+langgraph
+supabase
+gradio
+
+# Data processing
+pandas
+numpy
+pillow
+python-docx
+pymupdf
+pytesseract
+
+# Scientific computing
+scipy
+sympy
+scikit-learn
+matplotlib
+
+# Web and search
+requests
+wikipedia
+beautifulsoup4
+selenium
+
+# Others
+python-dotenv
